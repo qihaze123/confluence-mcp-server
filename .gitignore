@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+
+# logs
+*.log
+npm-debug.log*
+
+# local environment
+.env
+.env.*
+!.env.example
+
+# system files
+.DS_Store
+
+# local planning docs (do not include in GitHub repo)
+docs/feature-checklist.local.md
