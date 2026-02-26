@@ -2,10 +2,31 @@
   "name": "confluence-mcp-server",
   "version": "1.0.0",
   "description": "Confluence MCP server for search/read/update on Server/Data Center",
+  "license": "MIT",
+  "author": "熊猫哥",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "confluence-mcp-server": "dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qihaze123/confluence-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/qihaze123/confluence-mcp-server/issues"
+  },
+  "homepage": "https://github.com/qihaze123/confluence-mcp-server#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "confluence",
+    "atlassian",
+    "server",
+    "datacenter"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "files": [
     "dist",

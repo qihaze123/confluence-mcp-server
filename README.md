@@ -21,6 +21,27 @@ npm run build
 npm start
 ```
 
+## 通过 npx 使用（推荐）
+
+发布到 npm 后，可在 MCP 客户端中直接使用 `npx` 启动，无需手动克隆仓库：
+
+```json
+{
+  "mcpServers": {
+    "confluence": {
+      "command": "npx",
+      "args": ["-y", "confluence-mcp-server"],
+      "env": {
+        "CONF_BASE_URL": "https://confluence.example.com",
+        "CONF_USERNAME": "your-username",
+        "CONF_TOKEN": "your-token",
+        "CONF_DEFAULT_SPACE": "DOC"
+      }
+    }
+  }
+}
+```
+
 ## 环境变量
 
 - `CONF_BASE_URL`: Confluence 基础地址，例如 `https://confluence.example.com`

@@ -1,8 +1,10 @@
 # dependencies
 node_modules/
+.npm-cache/
 
 # build outputs
 dist/
+*.tgz
 
 # logs
 *.log
