@@ -1,6 +1,6 @@
 {
   "name": "confluence-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Confluence MCP server for Cloud/Server/Data Center search/read/create/update",
   "license": "MIT",
   "author": "熊猫哥",
