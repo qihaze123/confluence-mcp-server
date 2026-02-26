@@ -9,8 +9,6 @@
 - CI install strategy set to `npm ci` (lockfile committed)
 - npm package metadata completed (`license`, `repository`, `bugs`, `homepage`, `keywords`, `engines`)
 - README updated with direct `npx` usage example
-
-## Pending
-
-- npm authentication on this machine (`npm adduser` or `NPM_TOKEN`)
-- Publish package: `npm publish --access public`
+- npm package published: `confluence-mcp-server@1.0.0`（2026-02-26）
+- npm registry verified: `npm view confluence-mcp-server version` returns `1.0.0`
+- `npx -y confluence-mcp-server` startup verified (requires runtime env vars)
