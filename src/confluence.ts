@@ -110,14 +110,17 @@ async function fetchWithRetry(
       return fetchWithRetry(url, init, retriesLeft - 1);
     }
     return res;
-  } catch {
+  } catch (err: unknown) {
     // Retry on network/timeout errors.
     if (retriesLeft > 0) {
       const delay = BASE_DELAY_MS * 2 ** (MAX_RETRIES - retriesLeft);
       await sleep(delay);
       return fetchWithRetry(url, init, retriesLeft - 1);
     }
-    throw new Error("Request failed after retries");
+    if (err instanceof Error) {
+      throw err;
+    }
+    throw new Error(String(err));
   } finally {
     clearTimeout(timer);
   }
