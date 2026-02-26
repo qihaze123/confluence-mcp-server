@@ -8,10 +8,11 @@ import { registerTools } from "./tools.js";
 async function main(): Promise<void> {
   // 1. Validate env and build config (exits on failure)
   const config = buildConfig();
+  const identity = config.username ?? "token-auth";
 
   // Log startup info to stderr (never stdout — that's the MCP transport)
   console.error(
-    `[confluence-mcp] Connecting to ${config.baseUrl} as ${config.username}`,
+    `[confluence-mcp] Connecting to ${config.baseUrl} (mode=${config.mode}, auth=${config.resolvedAuthMode}) as ${identity}`,
   );
   if (config.defaultSpace) {
     console.error(`[confluence-mcp] Default space: ${config.defaultSpace}`);

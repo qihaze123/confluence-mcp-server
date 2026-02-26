@@ -1,7 +1,7 @@
 {
   "name": "confluence-mcp-server",
   "version": "1.0.0",
-  "description": "Confluence MCP server for search/read/update on Server/Data Center",
+  "description": "Confluence MCP server for Cloud/Server/Data Center search/read/create/update",
   "license": "MIT",
   "author": "熊猫哥",
   "type": "module",
@@ -22,6 +22,7 @@
     "model-context-protocol",
     "confluence",
     "atlassian",
+    "cloud",
     "server",
     "datacenter"
   ],
