@@ -187,4 +187,63 @@ export function registerTools(server: McpServer, client: ConfluenceClient): void
       }
     },
   );
+
+  server.tool(
+    "confluence_upload_attachment",
+    "Upload an attachment to a Confluence page. Supports local filePath or base64Data; same-name files are updated by default. Returns attachment fields and image storage markup when applicable.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      filePath: z
+        .string()
+        .optional()
+        .describe("Local file path to upload from the MCP server machine"),
+      base64Data: z
+        .string()
+        .optional()
+        .describe("Base64 file content, optionally as a data URL"),
+      fileName: z
+        .string()
+        .optional()
+        .describe("Attachment file name. Required for base64Data; defaults to basename(filePath)"),
+      contentType: z
+        .string()
+        .optional()
+        .describe("MIME type such as image/png. Inferred from fileName when omitted"),
+      comment: z.string().optional().describe("Attachment version comment"),
+      minorEdit: z
+        .boolean()
+        .optional()
+        .describe("Whether this attachment version is a minor edit (default true)"),
+      overwrite: z
+        .boolean()
+        .optional()
+        .describe("Update same-name attachment as a new version when true (default true); fail on duplicates when false"),
+    },
+    async ({
+      pageId,
+      filePath,
+      base64Data,
+      fileName,
+      contentType,
+      comment,
+      minorEdit,
+      overwrite,
+    }) => {
+      try {
+        const attachment = await client.uploadAttachment({
+          pageId,
+          filePath,
+          base64Data,
+          fileName,
+          contentType,
+          comment,
+          minorEdit,
+          overwrite,
+        });
+        return jsonContent(attachment);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
 }

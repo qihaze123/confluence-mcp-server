@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, extname, resolve } from "node:path";
+
 // ---- Config types -----------------------------------------------------------
 
 export type ConfluenceMode = "cloud" | "server";
@@ -28,6 +32,20 @@ export interface PageDetail extends ConfluencePage {
   bodyStorageValue: string;
 }
 
+export interface ConfluenceAttachment {
+  id: string;
+  type: string;
+  title: string;
+  fileName: string;
+  mediaType?: string;
+  fileSize?: number;
+  comment?: string;
+  url: string;
+  downloadUrl: string;
+  version?: number;
+  storageImageMarkup?: string;
+}
+
 export interface CurrentUser {
   id: string;
   accountId?: string;
@@ -46,7 +64,23 @@ interface ContentApiResult {
   space?: { key?: string };
   version?: { number?: number };
   body?: { storage?: { value?: string } };
+  metadata?: {
+    mediaType?: string;
+    comment?: string;
+  };
+  extensions?: {
+    mediaType?: string;
+    fileSize?: number;
+    comment?: string;
+  };
   _links?: { webui?: string };
+}
+
+interface AttachmentApiResult extends ContentApiResult {
+  _links?: {
+    webui?: string;
+    download?: string;
+  };
 }
 
 // ---- Error helpers ----------------------------------------------------------
@@ -142,6 +176,57 @@ function normalizeSiteBaseUrl(baseUrl: string, mode: ConfluenceMode): string {
   return trimmed;
 }
 
+function expandUserPath(filePath: string): string {
+  if (filePath === "~") {
+    return homedir();
+  }
+  if (filePath.startsWith("~/")) {
+    return resolve(homedir(), filePath.slice(2));
+  }
+  return resolve(filePath);
+}
+
+function stripDataUrlPrefix(value: string): string {
+  const match = value.match(/^data:[^,]+,(.*)$/s);
+  return match ? match[1] : value;
+}
+
+function inferContentType(fileName: string): string {
+  switch (extname(fileName).toLowerCase()) {
+    case ".apng":
+      return "image/apng";
+    case ".avif":
+      return "image/avif";
+    case ".bmp":
+      return "image/bmp";
+    case ".gif":
+      return "image/gif";
+    case ".jpeg":
+    case ".jpg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    case ".pdf":
+      return "application/pdf";
+    case ".txt":
+      return "text/plain";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function escapeXmlAttribute(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 // ---- Confluence client ------------------------------------------------------
 
 export class ConfluenceClient {
@@ -149,7 +234,8 @@ export class ConfluenceClient {
   private readonly siteBaseUrl: string;
   private readonly uiBaseUrl: string;
   private readonly apiBaseUrl: string;
-  private readonly headers: Record<string, string>;
+  private readonly baseHeaders: Record<string, string>;
+  private readonly jsonHeaders: Record<string, string>;
   private readonly defaultSpace?: string;
 
   constructor(config: ConfluenceConfig) {
@@ -164,10 +250,13 @@ export class ConfluenceClient {
         ? `${this.siteBaseUrl}/wiki/rest/api`
         : `${this.siteBaseUrl}/rest/api`;
 
-    this.headers = {
+    this.baseHeaders = {
       Authorization: config.authHeader,
-      "Content-Type": "application/json",
       Accept: "application/json",
+    };
+    this.jsonHeaders = {
+      ...this.baseHeaders,
+      "Content-Type": "application/json",
     };
     this.defaultSpace = config.defaultSpace;
   }
@@ -326,6 +415,78 @@ export class ConfluenceClient {
     return this.toPageRecord(json);
   }
 
+  async uploadAttachment(params: {
+    pageId: string;
+    filePath?: string;
+    base64Data?: string;
+    fileName?: string;
+    contentType?: string;
+    comment?: string;
+    minorEdit?: boolean;
+    overwrite?: boolean;
+  }): Promise<ConfluenceAttachment> {
+    const file = await this.readAttachmentInput(params);
+    let uploadUrl =
+      `${this.apiBaseUrl}/content/${encodeURIComponent(params.pageId)}/child/attachment`;
+
+    if (params.overwrite !== false) {
+      const existing = await this.findAttachmentByFileName(
+        params.pageId,
+        file.fileName,
+      );
+      if (existing?.id) {
+        uploadUrl =
+          `${this.apiBaseUrl}/content/${encodeURIComponent(params.pageId)}` +
+          `/child/attachment/${encodeURIComponent(existing.id)}/data`;
+      }
+    }
+
+    const res = await this.requestForm(
+      uploadUrl,
+      "POST",
+      this.buildAttachmentForm(file, params),
+    );
+    const json = (await res.json()) as { results?: AttachmentApiResult[] };
+    const attachment = json.results?.[0];
+    if (!attachment) {
+      throw new Error("Confluence did not return an uploaded attachment record.");
+    }
+    return this.toAttachmentRecord(attachment, file.fileName);
+  }
+
+  private async findAttachmentByFileName(
+    pageId: string,
+    fileName: string,
+  ): Promise<AttachmentApiResult | undefined> {
+    const params = new URLSearchParams({
+      filename: fileName,
+      expand: "version,metadata,extensions",
+    });
+    const res = await this.request(
+      `${this.apiBaseUrl}/content/${encodeURIComponent(pageId)}/child/attachment?${params.toString()}`,
+      "GET",
+    );
+    const json = (await res.json()) as { results?: AttachmentApiResult[] };
+    return (json.results ?? []).find((item) => item.title === fileName);
+  }
+
+  private buildAttachmentForm(
+    file: { data: Buffer; fileName: string; contentType: string },
+    params: { comment?: string; minorEdit?: boolean },
+  ): FormData {
+    const form = new FormData();
+    const blob = new Blob([file.data as unknown as BlobPart], {
+      type: file.contentType,
+    });
+
+    form.append("file", blob, file.fileName);
+    form.append("minorEdit", String(params.minorEdit ?? true));
+    if (params.comment) {
+      form.append("comment", params.comment);
+    }
+    return form;
+  }
+
   private toPageRecord(item: ContentApiResult): ConfluencePage {
     const pageId = String(item.id ?? "");
     const result: ConfluencePage = {
@@ -337,6 +498,41 @@ export class ConfluenceClient {
     };
     if (typeof item.version?.number === "number") {
       result.version = item.version.number;
+    }
+    return result;
+  }
+
+  private toAttachmentRecord(
+    item: AttachmentApiResult,
+    fallbackFileName: string,
+  ): ConfluenceAttachment {
+    const attachmentId = String(item.id ?? "");
+    const fileName = item.title || fallbackFileName;
+    const mediaType = item.metadata?.mediaType ?? item.extensions?.mediaType;
+    const result: ConfluenceAttachment = {
+      id: attachmentId,
+      type: item.type ?? "attachment",
+      title: item.title ?? fileName,
+      fileName,
+      url: this.resolvePageUrl(item._links?.webui, attachmentId),
+      downloadUrl: this.resolveDownloadUrl(item._links?.download),
+    };
+    if (mediaType) {
+      result.mediaType = mediaType;
+    }
+    if (typeof item.extensions?.fileSize === "number") {
+      result.fileSize = item.extensions.fileSize;
+    }
+    const comment = item.metadata?.comment ?? item.extensions?.comment;
+    if (comment) {
+      result.comment = comment;
+    }
+    if (typeof item.version?.number === "number") {
+      result.version = item.version.number;
+    }
+    if ((mediaType ?? inferContentType(fileName)).startsWith("image/")) {
+      result.storageImageMarkup =
+        `<ac:image><ri:attachment ri:filename="${escapeXmlAttribute(fileName)}" /></ac:image>`;
     }
     return result;
   }
@@ -362,6 +558,60 @@ export class ConfluenceClient {
     return `${this.siteBaseUrl}${fallbackPath}`;
   }
 
+  private resolveDownloadUrl(download: string | undefined): string {
+    if (download) {
+      if (/^https?:\/\//i.test(download)) {
+        return download;
+      }
+      const path = download.startsWith("/") ? download : `/${download}`;
+      if (this.mode === "cloud") {
+        return path.startsWith("/wiki/")
+          ? `${this.siteBaseUrl}${path}`
+          : `${this.uiBaseUrl}${path}`;
+      }
+      return `${this.siteBaseUrl}${path}`;
+    }
+    return "";
+  }
+
+  private async readAttachmentInput(params: {
+    filePath?: string;
+    base64Data?: string;
+    fileName?: string;
+    contentType?: string;
+  }): Promise<{ data: Buffer; fileName: string; contentType: string }> {
+    if (params.filePath && params.base64Data) {
+      throw new Error("Provide either filePath or base64Data, not both.");
+    }
+    if (!params.filePath && !params.base64Data) {
+      throw new Error("Either filePath or base64Data is required.");
+    }
+
+    if (params.filePath) {
+      const absolutePath = expandUserPath(params.filePath);
+      const fileName = params.fileName || basename(absolutePath);
+      if (!fileName) {
+        throw new Error("fileName could not be inferred from filePath.");
+      }
+      const data = await readFile(absolutePath);
+      return {
+        data,
+        fileName,
+        contentType: params.contentType ?? inferContentType(fileName),
+      };
+    }
+
+    const fileName = params.fileName?.trim();
+    if (!fileName) {
+      throw new Error("fileName is required when using base64Data.");
+    }
+    return {
+      data: Buffer.from(stripDataUrlPrefix(params.base64Data ?? ""), "base64"),
+      fileName,
+      contentType: params.contentType ?? inferContentType(fileName),
+    };
+  }
+
   private async request(
     url: string,
     method: string,
@@ -369,8 +619,30 @@ export class ConfluenceClient {
   ): Promise<Response> {
     const init: RequestInit = {
       method,
-      headers: this.headers,
+      headers: this.jsonHeaders,
       ...(body ? { body } : {}),
+    };
+
+    const res = await fetchWithRetry(url, init);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new ConfluenceApiError(res.status, res.statusText, text);
+    }
+    return res;
+  }
+
+  private async requestForm(
+    url: string,
+    method: string,
+    body: FormData,
+  ): Promise<Response> {
+    const init: RequestInit = {
+      method,
+      headers: {
+        ...this.baseHeaders,
+        "X-Atlassian-Token": "nocheck",
+      },
+      body,
     };
 
     const res = await fetchWithRetry(url, init);

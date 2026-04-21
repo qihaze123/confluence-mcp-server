@@ -1,6 +1,6 @@
 # confluence-mcp-server
 
-一个面向 Confluence Cloud / Server / Data Center 的 MCP 服务，提供页面搜索、CQL 查询、读取、创建、更新和用户身份查询能力。
+一个面向 Confluence Cloud / Server / Data Center 的 MCP 服务，提供页面搜索、CQL 查询、读取、创建、更新、附件上传和用户身份查询能力。
 
 ## 功能
 
@@ -9,6 +9,7 @@
 - `confluence_get_page`: 按页面 ID 获取内容（storage 格式）
 - `confluence_create_page`: 创建页面（支持可选 `parentId`）
 - `confluence_update_page`: 更新页面内容并自动递增版本
+- `confluence_upload_attachment`: 上传页面附件（支持本地文件路径或 base64，同名附件默认更新为新版本）
 - `confluence_get_current_user`: 获取当前认证用户（whoami）
 
 ## 环境要求
@@ -82,3 +83,4 @@ npm start
 - Cloud 模式固定使用 Basic（`CONF_USERNAME` + `CONF_TOKEN/CONF_PASSWORD`）。
 - Server 模式可用 Bearer 或 Basic（`CONF_AUTH_MODE=auto` 时优先 Bearer）。
 - Cloud 模式 API 基础路径为 `/wiki/rest/api`，Server 模式为 `/rest/api`。
+- 上传图片后，`confluence_upload_attachment` 会返回 `storageImageMarkup`，可把它拼到 `confluence_update_page` 的 `bodyStorageValue` 中展示图片。
