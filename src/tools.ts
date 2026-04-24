@@ -120,6 +120,81 @@ export function registerTools(server: McpServer, client: ConfluenceClient): void
   );
 
   server.tool(
+    "confluence_get_page_outline",
+    "Get a page outline by parsing headings from body.storage. Returns unified fields plus headings[] for low-token navigation.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+    },
+    async ({ pageId }) => {
+      try {
+        const outline = await client.getPageOutline(pageId);
+        return jsonContent(outline);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_get_page_section",
+    "Get a single page section by heading. The server fetches full storage internally but only returns the matched section to save tokens.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      heading: z.string().describe("Heading text used to locate the target section"),
+      occurrence: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("When the same heading appears multiple times, choose which occurrence (default 1)"),
+      includeHeading: z
+        .boolean()
+        .optional()
+        .describe("Include the heading tag in the returned section (default true)"),
+      matchMode: z
+        .enum(["exact", "contains"])
+        .optional()
+        .describe("Heading match mode: exact or contains (default exact)"),
+    },
+    async ({ pageId, heading, occurrence, includeHeading, matchMode }) => {
+      try {
+        const section = await client.getPageSection({
+          pageId,
+          heading,
+          occurrence,
+          includeHeading,
+          matchMode,
+        });
+        return jsonContent(section);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_get_page_anchor_block",
+    "Get a page block between two invisible anchor macros. Returns only the matched block to save tokens.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      startAnchor: z.string().describe("Start anchor name"),
+      endAnchor: z.string().describe("End anchor name"),
+    },
+    async ({ pageId, startAnchor, endAnchor }) => {
+      try {
+        const block = await client.getPageAnchorBlock({
+          pageId,
+          startAnchor,
+          endAnchor,
+        });
+        return jsonContent(block);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
     "confluence_create_page",
     "Create a Confluence page. Supports optional parentId. Returns unified fields.",
     {
@@ -182,6 +257,325 @@ export function registerTools(server: McpServer, client: ConfluenceClient): void
           message,
         });
         return jsonContent(page);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_update_page_section",
+    "Update one page section by heading. The server fetches full storage internally, replaces the matched range, and writes back the whole page so the model only sends the section content.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      heading: z.string().describe("Heading text used to locate the target section"),
+      sectionStorageValue: z
+        .string()
+        .describe("Replacement storage XHTML for the target section"),
+      occurrence: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("When the same heading appears multiple times, choose which occurrence (default 1)"),
+      includeHeading: z
+        .boolean()
+        .optional()
+        .describe("When true replace from the heading tag itself; when false only replace the body below it (default true)"),
+      matchMode: z
+        .enum(["exact", "contains"])
+        .optional()
+        .describe("Heading match mode: exact or contains (default exact)"),
+      title: z
+        .string()
+        .optional()
+        .describe("New page title (keeps current title if omitted)"),
+      minorEdit: z
+        .boolean()
+        .optional()
+        .describe("Whether this is a minor edit (default true)"),
+      message: z
+        .string()
+        .optional()
+        .describe("Version update message / change comment"),
+    },
+    async ({
+      pageId,
+      heading,
+      sectionStorageValue,
+      occurrence,
+      includeHeading,
+      matchMode,
+      title,
+      minorEdit,
+      message,
+    }) => {
+      try {
+        const page = await client.updatePageSection({
+          pageId,
+          heading,
+          sectionStorageValue,
+          occurrence,
+          includeHeading,
+          matchMode,
+          title,
+          minorEdit,
+          message,
+        });
+        return jsonContent(page);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_preview_page_section_update",
+    "Preview a heading-based section update. Returns the currently matched section, the proposed replacement, and a hash that must be echoed to the confirmed update call.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      heading: z.string().describe("Heading text used to locate the target section"),
+      sectionStorageValue: z
+        .string()
+        .describe("Proposed replacement storage XHTML for the target section"),
+      occurrence: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("When the same heading appears multiple times, choose which occurrence (default 1)"),
+      includeHeading: z
+        .boolean()
+        .optional()
+        .describe("Include the heading tag in the previewed replace range (default true)"),
+      matchMode: z
+        .enum(["exact", "contains"])
+        .optional()
+        .describe("Heading match mode: exact or contains (default exact)"),
+    },
+    async ({ pageId, heading, sectionStorageValue, occurrence, includeHeading, matchMode }) => {
+      try {
+        const preview = await client.previewPageSectionUpdate({
+          pageId,
+          heading,
+          sectionStorageValue,
+          occurrence,
+          includeHeading,
+          matchMode,
+        });
+        return jsonContent(preview);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_update_page_section_confirmed",
+    "Confirm a heading-based section update after preview. The server re-reads the page and only updates when the preview hash still matches current content.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      heading: z.string().describe("Heading text used to locate the target section"),
+      sectionStorageValue: z
+        .string()
+        .describe("Replacement storage XHTML for the target section"),
+      expectedCurrentHash: z
+        .string()
+        .describe("Hash returned by confluence_preview_page_section_update"),
+      occurrence: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("When the same heading appears multiple times, choose which occurrence (default 1)"),
+      includeHeading: z
+        .boolean()
+        .optional()
+        .describe("When true replace from the heading tag itself; when false only replace the body below it (default true)"),
+      matchMode: z
+        .enum(["exact", "contains"])
+        .optional()
+        .describe("Heading match mode: exact or contains (default exact)"),
+      title: z
+        .string()
+        .optional()
+        .describe("New page title (keeps current title if omitted)"),
+      minorEdit: z
+        .boolean()
+        .optional()
+        .describe("Whether this is a minor edit (default true)"),
+      message: z
+        .string()
+        .optional()
+        .describe("Version update message / change comment"),
+    },
+    async ({
+      pageId,
+      heading,
+      sectionStorageValue,
+      expectedCurrentHash,
+      occurrence,
+      includeHeading,
+      matchMode,
+      title,
+      minorEdit,
+      message,
+    }) => {
+      try {
+        const page = await client.confirmPageSectionUpdate({
+          pageId,
+          heading,
+          sectionStorageValue,
+          expectedCurrentHash,
+          occurrence,
+          includeHeading,
+          matchMode,
+          title,
+          minorEdit,
+          message,
+        });
+        return jsonContent(page);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_add_anchor_block_to_section",
+    "Insert invisible start/end anchor macros around a heading-based section so later updates can target a stable block instead of relying on heading matching.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      heading: z.string().describe("Heading text used to locate the section"),
+      startAnchor: z.string().describe("Start anchor name to insert before the section"),
+      endAnchor: z.string().describe("End anchor name to insert after the section"),
+      occurrence: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("When the same heading appears multiple times, choose which occurrence (default 1)"),
+      matchMode: z
+        .enum(["exact", "contains"])
+        .optional()
+        .describe("Heading match mode: exact or contains (default exact)"),
+      title: z
+        .string()
+        .optional()
+        .describe("New page title (keeps current title if omitted)"),
+      minorEdit: z
+        .boolean()
+        .optional()
+        .describe("Whether this is a minor edit (default true)"),
+      message: z
+        .string()
+        .optional()
+        .describe("Version update message / change comment"),
+    },
+    async ({
+      pageId,
+      heading,
+      startAnchor,
+      endAnchor,
+      occurrence,
+      matchMode,
+      title,
+      minorEdit,
+      message,
+    }) => {
+      try {
+        const block = await client.addAnchorsAroundSection({
+          pageId,
+          heading,
+          startAnchor,
+          endAnchor,
+          occurrence,
+          matchMode,
+          title,
+          minorEdit,
+          message,
+        });
+        return jsonContent(block);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_preview_page_anchor_block_update",
+    "Preview an anchor-based block update. Returns the current block, the proposed replacement, and a hash that must be echoed to the confirmed update call.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      startAnchor: z.string().describe("Start anchor name"),
+      endAnchor: z.string().describe("End anchor name"),
+      blockStorageValue: z
+        .string()
+        .describe("Proposed replacement storage XHTML between the two anchors"),
+    },
+    async ({ pageId, startAnchor, endAnchor, blockStorageValue }) => {
+      try {
+        const preview = await client.previewPageAnchorBlockUpdate({
+          pageId,
+          startAnchor,
+          endAnchor,
+          blockStorageValue,
+        });
+        return jsonContent(preview);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_update_page_anchor_block_confirmed",
+    "Confirm an anchor-based block update after preview. The server re-reads the page and only updates when the preview hash still matches current content.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      startAnchor: z.string().describe("Start anchor name"),
+      endAnchor: z.string().describe("End anchor name"),
+      blockStorageValue: z
+        .string()
+        .describe("Replacement storage XHTML between the two anchors"),
+      expectedCurrentHash: z
+        .string()
+        .describe("Hash returned by confluence_preview_page_anchor_block_update"),
+      title: z
+        .string()
+        .optional()
+        .describe("New page title (keeps current title if omitted)"),
+      minorEdit: z
+        .boolean()
+        .optional()
+        .describe("Whether this is a minor edit (default true)"),
+      message: z
+        .string()
+        .optional()
+        .describe("Version update message / change comment"),
+    },
+    async ({
+      pageId,
+      startAnchor,
+      endAnchor,
+      blockStorageValue,
+      expectedCurrentHash,
+      title,
+      minorEdit,
+      message,
+    }) => {
+      try {
+        const block = await client.confirmPageAnchorBlockUpdate({
+          pageId,
+          startAnchor,
+          endAnchor,
+          blockStorageValue,
+          expectedCurrentHash,
+          title,
+          minorEdit,
+          message,
+        });
+        return jsonContent(block);
       } catch (error) {
         return errorContent(error);
       }

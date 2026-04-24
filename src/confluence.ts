@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 // ---- Config types -----------------------------------------------------------
 
@@ -30,6 +31,39 @@ export interface ConfluencePage {
 
 export interface PageDetail extends ConfluencePage {
   bodyStorageValue: string;
+}
+
+export interface PageHeading {
+  level: number;
+  text: string;
+  occurrence: number;
+}
+
+export interface PageOutline extends ConfluencePage {
+  headings: PageHeading[];
+}
+
+export interface PageSection extends ConfluencePage {
+  heading: string;
+  level: number;
+  occurrence: number;
+  includeHeading: boolean;
+  sectionStorageValue: string;
+}
+
+export interface PageAnchorBlock extends ConfluencePage {
+  startAnchor: string;
+  endAnchor: string;
+  blockStorageValue: string;
+}
+
+export interface PageSectionUpdatePreview extends ConfluencePage {
+  targetType: "heading" | "anchor";
+  targetLabel: string;
+  includeHeading?: boolean;
+  oldStorageValue: string;
+  newStorageValue: string;
+  expectedCurrentHash: string;
 }
 
 export interface ConfluenceAttachment {
@@ -227,6 +261,222 @@ function escapeXmlAttribute(input: string): string {
     .replace(/>/g, "&gt;");
 }
 
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, decimal: string) =>
+      String.fromCodePoint(Number.parseInt(decimal, 10)),
+    )
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    );
+}
+
+function stripTags(input: string): string {
+  return input.replace(/<[^>]+>/g, " ");
+}
+
+function normalizeText(input: string): string {
+  return decodeHtmlEntities(stripTags(input)).replace(/\s+/g, " ").trim();
+}
+
+function normalizeHeadingKey(input: string): string {
+  return normalizeText(input).toLowerCase();
+}
+
+type HeadingMatchMode = "exact" | "contains";
+
+interface HeadingMatch extends PageHeading {
+  start: number;
+  end: number;
+}
+
+interface SectionMatch extends HeadingMatch {
+  contentStart: number;
+  contentEnd: number;
+}
+
+interface AnchorMatch {
+  name: string;
+  start: number;
+  end: number;
+}
+
+interface AnchorBlockMatch {
+  startAnchor: AnchorMatch;
+  endAnchor: AnchorMatch;
+  contentStart: number;
+  contentEnd: number;
+}
+
+function buildContentHash(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function extractHeadingMatches(bodyStorageValue: string): HeadingMatch[] {
+  const regex = /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi;
+  const occurrences = new Map<string, number>();
+  const matches: HeadingMatch[] = [];
+
+  for (const match of bodyStorageValue.matchAll(regex)) {
+    const fullMatch = match[0];
+    const level = Number.parseInt(match[1] ?? "", 10);
+    const rawHeading = match[2] ?? "";
+    const text = normalizeText(rawHeading);
+    const key = text.toLowerCase();
+    const occurrence = (occurrences.get(key) ?? 0) + 1;
+    occurrences.set(key, occurrence);
+
+    matches.push({
+      level,
+      text,
+      occurrence,
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + fullMatch.length,
+    });
+  }
+
+  return matches;
+}
+
+function findSectionMatch(params: {
+  bodyStorageValue: string;
+  heading: string;
+  occurrence?: number;
+  matchMode?: HeadingMatchMode;
+}): SectionMatch {
+  const matches = extractHeadingMatches(params.bodyStorageValue);
+  const targetKey = normalizeHeadingKey(params.heading);
+  const requestedOccurrence = params.occurrence ?? 1;
+  const matchMode = params.matchMode ?? "exact";
+
+  const targetIndex = matches.findIndex((match) => {
+    const matchKey = match.text.toLowerCase();
+    if (match.occurrence !== requestedOccurrence) {
+      return false;
+    }
+    return matchMode === "contains"
+      ? matchKey.includes(targetKey)
+      : matchKey === targetKey;
+  });
+
+  if (targetIndex === -1) {
+    throw new Error(
+      `Heading not found: "${params.heading}" (occurrence=${requestedOccurrence}, matchMode=${matchMode}).`,
+    );
+  }
+
+  const target = matches[targetIndex];
+  let contentEnd = params.bodyStorageValue.length;
+
+  for (let index = targetIndex + 1; index < matches.length; index += 1) {
+    const candidate = matches[index];
+    if (candidate.level <= target.level) {
+      contentEnd = candidate.start;
+      break;
+    }
+  }
+
+  return {
+    ...target,
+    contentStart: target.end,
+    contentEnd,
+  };
+}
+
+function extractAnchorName(macroStorageValue: string): string | undefined {
+  const patterns = [
+    /<ac:parameter\b[^>]*\bac:name="name"[^>]*>([\s\S]*?)<\/ac:parameter>/i,
+    /<ac:parameter\b[^>]*\bac:name=""[^>]*>([\s\S]*?)<\/ac:parameter>/i,
+    /<ac:default-parameter>([\s\S]*?)<\/ac:default-parameter>/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = macroStorageValue.match(pattern);
+    if (match?.[1]) {
+      const name = normalizeText(match[1]);
+      if (name) {
+        return name;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function extractAnchorMatches(bodyStorageValue: string): AnchorMatch[] {
+  const regex =
+    /<ac:structured-macro\b[^>]*\bac:name="anchor"[^>]*>[\s\S]*?<\/ac:structured-macro>/gi;
+  const matches: AnchorMatch[] = [];
+
+  for (const match of bodyStorageValue.matchAll(regex)) {
+    const fullMatch = match[0];
+    const name = extractAnchorName(fullMatch);
+    if (!name) {
+      continue;
+    }
+
+    matches.push({
+      name,
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + fullMatch.length,
+    });
+  }
+
+  return matches;
+}
+
+function findAnchorBlockMatch(params: {
+  bodyStorageValue: string;
+  startAnchor: string;
+  endAnchor: string;
+}): AnchorBlockMatch {
+  const anchors = extractAnchorMatches(params.bodyStorageValue);
+  const startKey = normalizeHeadingKey(params.startAnchor);
+  const endKey = normalizeHeadingKey(params.endAnchor);
+  const startAnchor = anchors.find(
+    (anchor) => normalizeHeadingKey(anchor.name) === startKey,
+  );
+
+  if (!startAnchor) {
+    throw new Error(`Start anchor not found: "${params.startAnchor}".`);
+  }
+
+  const endAnchor = anchors.find(
+    (anchor) =>
+      anchor.start > startAnchor.start &&
+      normalizeHeadingKey(anchor.name) === endKey,
+  );
+
+  if (!endAnchor) {
+    throw new Error(`End anchor not found after start anchor: "${params.endAnchor}".`);
+  }
+
+  if (endAnchor.start < startAnchor.end) {
+    throw new Error("Invalid anchor block: end anchor overlaps start anchor.");
+  }
+
+  return {
+    startAnchor,
+    endAnchor,
+    contentStart: startAnchor.end,
+    contentEnd: endAnchor.start,
+  };
+}
+
+function createAnchorMacro(name: string): string {
+  return (
+    '<ac:structured-macro ac:name="anchor" ac:schema-version="1">' +
+    `<ac:parameter ac:name="name">${escapeXmlAttribute(name.trim())}</ac:parameter>` +
+    "</ac:structured-macro>"
+  );
+}
+
 // ---- Confluence client ------------------------------------------------------
 
 export class ConfluenceClient {
@@ -339,6 +589,300 @@ export class ConfluenceClient {
     };
   }
 
+  async getPageOutline(pageId: string): Promise<PageOutline> {
+    const page = await this.getPage(pageId, "body.storage,version,space");
+    return {
+      id: page.id,
+      type: page.type,
+      title: page.title,
+      spaceKey: page.spaceKey,
+      url: page.url,
+      ...(typeof page.version === "number" ? { version: page.version } : {}),
+      headings: extractHeadingMatches(page.bodyStorageValue).map((heading) => ({
+        level: heading.level,
+        text: heading.text,
+        occurrence: heading.occurrence,
+      })),
+    };
+  }
+
+  async getPageSection(params: {
+    pageId: string;
+    heading: string;
+    occurrence?: number;
+    includeHeading?: boolean;
+    matchMode?: HeadingMatchMode;
+  }): Promise<PageSection> {
+    const page = await this.getPage(params.pageId, "body.storage,version,space");
+    const section = findSectionMatch({
+      bodyStorageValue: page.bodyStorageValue,
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+    });
+    const start = params.includeHeading === false ? section.contentStart : section.start;
+    const end = section.contentEnd;
+
+    return {
+      id: page.id,
+      type: page.type,
+      title: page.title,
+      spaceKey: page.spaceKey,
+      url: page.url,
+      ...(typeof page.version === "number" ? { version: page.version } : {}),
+      heading: section.text,
+      level: section.level,
+      occurrence: section.occurrence,
+      includeHeading: params.includeHeading !== false,
+      sectionStorageValue: page.bodyStorageValue.slice(start, end).trim(),
+    };
+  }
+
+  async getPageAnchorBlock(params: {
+    pageId: string;
+    startAnchor: string;
+    endAnchor: string;
+  }): Promise<PageAnchorBlock> {
+    const page = await this.getPage(params.pageId, "body.storage,version,space");
+    const block = findAnchorBlockMatch({
+      bodyStorageValue: page.bodyStorageValue,
+      startAnchor: params.startAnchor,
+      endAnchor: params.endAnchor,
+    });
+
+    return {
+      id: page.id,
+      type: page.type,
+      title: page.title,
+      spaceKey: page.spaceKey,
+      url: page.url,
+      ...(typeof page.version === "number" ? { version: page.version } : {}),
+      startAnchor: block.startAnchor.name,
+      endAnchor: block.endAnchor.name,
+      blockStorageValue: page.bodyStorageValue
+        .slice(block.contentStart, block.contentEnd)
+        .trim(),
+    };
+  }
+
+  async previewPageSectionUpdate(params: {
+    pageId: string;
+    heading: string;
+    sectionStorageValue: string;
+    occurrence?: number;
+    includeHeading?: boolean;
+    matchMode?: HeadingMatchMode;
+  }): Promise<PageSectionUpdatePreview> {
+    const page = await this.getPage(params.pageId, "body.storage,version,space");
+    const section = findSectionMatch({
+      bodyStorageValue: page.bodyStorageValue,
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+    });
+    const includeHeading = params.includeHeading !== false;
+    const start = includeHeading ? section.start : section.contentStart;
+    const end = section.contentEnd;
+    const oldStorageValue = page.bodyStorageValue.slice(start, end).trim();
+
+    return {
+      id: page.id,
+      type: page.type,
+      title: page.title,
+      spaceKey: page.spaceKey,
+      url: page.url,
+      ...(typeof page.version === "number" ? { version: page.version } : {}),
+      targetType: "heading",
+      targetLabel: `${section.text}#${section.occurrence}`,
+      includeHeading,
+      oldStorageValue,
+      newStorageValue: params.sectionStorageValue.trim(),
+      expectedCurrentHash: buildContentHash(oldStorageValue),
+    };
+  }
+
+  async confirmPageSectionUpdate(params: {
+    pageId: string;
+    heading: string;
+    sectionStorageValue: string;
+    expectedCurrentHash: string;
+    occurrence?: number;
+    includeHeading?: boolean;
+    matchMode?: HeadingMatchMode;
+    title?: string;
+    minorEdit?: boolean;
+    message?: string;
+  }): Promise<PageSection> {
+    const current = await this.getPage(params.pageId, "body.storage,version,space");
+    const section = findSectionMatch({
+      bodyStorageValue: current.bodyStorageValue,
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+    });
+    const includeHeading = params.includeHeading !== false;
+    const replaceStart = includeHeading ? section.start : section.contentStart;
+    const replaceEnd = section.contentEnd;
+    const currentStorageValue = current.bodyStorageValue
+      .slice(replaceStart, replaceEnd)
+      .trim();
+
+    if (buildContentHash(currentStorageValue) !== params.expectedCurrentHash) {
+      throw new Error(
+        "Preview hash mismatch. The target section changed after preview; preview again before updating.",
+      );
+    }
+
+    const updated = await this.updatePageBody(current, {
+      nextBodyStorageValue:
+        current.bodyStorageValue.slice(0, replaceStart) +
+        params.sectionStorageValue +
+        current.bodyStorageValue.slice(replaceEnd),
+      title: params.title,
+      minorEdit: params.minorEdit,
+      message: params.message,
+    });
+
+    return {
+      ...updated,
+      heading: section.text,
+      level: section.level,
+      occurrence: section.occurrence,
+      includeHeading,
+      sectionStorageValue: params.sectionStorageValue.trim(),
+    };
+  }
+
+  async addAnchorsAroundSection(params: {
+    pageId: string;
+    heading: string;
+    startAnchor: string;
+    endAnchor: string;
+    occurrence?: number;
+    matchMode?: HeadingMatchMode;
+    title?: string;
+    minorEdit?: boolean;
+    message?: string;
+  }): Promise<PageAnchorBlock> {
+    const current = await this.getPage(params.pageId, "body.storage,version,space");
+    const anchors = extractAnchorMatches(current.bodyStorageValue);
+    const normalizedStart = normalizeHeadingKey(params.startAnchor);
+    const normalizedEnd = normalizeHeadingKey(params.endAnchor);
+
+    if (anchors.some((anchor) => normalizeHeadingKey(anchor.name) === normalizedStart)) {
+      throw new Error(`Start anchor already exists: "${params.startAnchor}".`);
+    }
+    if (anchors.some((anchor) => normalizeHeadingKey(anchor.name) === normalizedEnd)) {
+      throw new Error(`End anchor already exists: "${params.endAnchor}".`);
+    }
+
+    const section = findSectionMatch({
+      bodyStorageValue: current.bodyStorageValue,
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+    });
+    const startMacro = createAnchorMacro(params.startAnchor);
+    const endMacro = createAnchorMacro(params.endAnchor);
+    const nextBody =
+      current.bodyStorageValue.slice(0, section.start) +
+      startMacro +
+      current.bodyStorageValue.slice(section.start, section.contentEnd) +
+      endMacro +
+      current.bodyStorageValue.slice(section.contentEnd);
+
+    const updated = await this.updatePageBody(current, {
+      nextBodyStorageValue: nextBody,
+      title: params.title,
+      minorEdit: params.minorEdit,
+      message: params.message,
+    });
+
+    return {
+      ...updated,
+      startAnchor: params.startAnchor.trim(),
+      endAnchor: params.endAnchor.trim(),
+      blockStorageValue: current.bodyStorageValue
+        .slice(section.start, section.contentEnd)
+        .trim(),
+    };
+  }
+
+  async previewPageAnchorBlockUpdate(params: {
+    pageId: string;
+    startAnchor: string;
+    endAnchor: string;
+    blockStorageValue: string;
+  }): Promise<PageSectionUpdatePreview> {
+    const page = await this.getPage(params.pageId, "body.storage,version,space");
+    const block = findAnchorBlockMatch({
+      bodyStorageValue: page.bodyStorageValue,
+      startAnchor: params.startAnchor,
+      endAnchor: params.endAnchor,
+    });
+    const oldStorageValue = page.bodyStorageValue
+      .slice(block.contentStart, block.contentEnd)
+      .trim();
+
+    return {
+      id: page.id,
+      type: page.type,
+      title: page.title,
+      spaceKey: page.spaceKey,
+      url: page.url,
+      ...(typeof page.version === "number" ? { version: page.version } : {}),
+      targetType: "anchor",
+      targetLabel: `${block.startAnchor.name} -> ${block.endAnchor.name}`,
+      oldStorageValue,
+      newStorageValue: params.blockStorageValue.trim(),
+      expectedCurrentHash: buildContentHash(oldStorageValue),
+    };
+  }
+
+  async confirmPageAnchorBlockUpdate(params: {
+    pageId: string;
+    startAnchor: string;
+    endAnchor: string;
+    blockStorageValue: string;
+    expectedCurrentHash: string;
+    title?: string;
+    minorEdit?: boolean;
+    message?: string;
+  }): Promise<PageAnchorBlock> {
+    const current = await this.getPage(params.pageId, "body.storage,version,space");
+    const block = findAnchorBlockMatch({
+      bodyStorageValue: current.bodyStorageValue,
+      startAnchor: params.startAnchor,
+      endAnchor: params.endAnchor,
+    });
+    const currentStorageValue = current.bodyStorageValue
+      .slice(block.contentStart, block.contentEnd)
+      .trim();
+
+    if (buildContentHash(currentStorageValue) !== params.expectedCurrentHash) {
+      throw new Error(
+        "Preview hash mismatch. The anchor block changed after preview; preview again before updating.",
+      );
+    }
+
+    const updated = await this.updatePageBody(current, {
+      nextBodyStorageValue:
+        current.bodyStorageValue.slice(0, block.contentStart) +
+        params.blockStorageValue +
+        current.bodyStorageValue.slice(block.contentEnd),
+      title: params.title,
+      minorEdit: params.minorEdit,
+      message: params.message,
+    });
+
+    return {
+      ...updated,
+      startAnchor: block.startAnchor.name,
+      endAnchor: block.endAnchor.name,
+      blockStorageValue: params.blockStorageValue.trim(),
+    };
+  }
+
   async createPage(params: {
     title: string;
     bodyStorageValue: string;
@@ -385,34 +929,53 @@ export class ConfluenceClient {
   }): Promise<ConfluencePage> {
     // Need current version and title before update.
     const current = await this.getPage(params.pageId, "version,space");
-    const nextVersion = (current.version ?? 0) + 1;
-    const nextTitle = params.title ?? current.title;
+    return this.updatePageBody(current, {
+      nextBodyStorageValue: params.bodyStorageValue,
+      title: params.title,
+      minorEdit: params.minorEdit,
+      message: params.message,
+    });
+  }
 
-    const body: Record<string, unknown> = {
-      id: params.pageId,
-      type: "page",
-      title: nextTitle,
-      version: {
-        number: nextVersion,
-        minorEdit: params.minorEdit ?? true,
-        ...(params.message ? { message: params.message } : {}),
-      },
-      body: {
-        storage: {
-          value: params.bodyStorageValue,
-          representation: "storage",
-        },
-      },
-      ...(current.spaceKey ? { space: { key: current.spaceKey } } : {}),
+  async updatePageSection(params: {
+    pageId: string;
+    heading: string;
+    sectionStorageValue: string;
+    occurrence?: number;
+    includeHeading?: boolean;
+    matchMode?: HeadingMatchMode;
+    title?: string;
+    minorEdit?: boolean;
+    message?: string;
+  }): Promise<PageSection> {
+    const current = await this.getPage(params.pageId, "body.storage,version,space");
+    const section = findSectionMatch({
+      bodyStorageValue: current.bodyStorageValue,
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+    });
+    const includeHeading = params.includeHeading !== false;
+    const replaceStart = includeHeading ? section.start : section.contentStart;
+    const replaceEnd = section.contentEnd;
+    const updated = await this.updatePageBody(current, {
+      nextBodyStorageValue:
+        current.bodyStorageValue.slice(0, replaceStart) +
+        params.sectionStorageValue +
+        current.bodyStorageValue.slice(replaceEnd),
+      title: params.title,
+      minorEdit: params.minorEdit,
+      message: params.message,
+    });
+
+    return {
+      ...updated,
+      heading: section.text,
+      level: section.level,
+      occurrence: section.occurrence,
+      includeHeading,
+      sectionStorageValue: params.sectionStorageValue.trim(),
     };
-
-    const res = await this.request(
-      `${this.apiBaseUrl}/content/${encodeURIComponent(params.pageId)}`,
-      "PUT",
-      JSON.stringify(body),
-    );
-    const json = (await res.json()) as ContentApiResult;
-    return this.toPageRecord(json);
   }
 
   async uploadAttachment(params: {
@@ -452,6 +1015,44 @@ export class ConfluenceClient {
       throw new Error("Confluence did not return an uploaded attachment record.");
     }
     return this.toAttachmentRecord(attachment, file.fileName);
+  }
+
+  private async updatePageBody(
+    current: PageDetail,
+    params: {
+      nextBodyStorageValue: string;
+      title?: string;
+      minorEdit?: boolean;
+      message?: string;
+    },
+  ): Promise<ConfluencePage> {
+    const nextVersion = (current.version ?? 0) + 1;
+    const nextTitle = params.title ?? current.title;
+    const body: Record<string, unknown> = {
+      id: current.id,
+      type: "page",
+      title: nextTitle,
+      version: {
+        number: nextVersion,
+        minorEdit: params.minorEdit ?? true,
+        ...(params.message ? { message: params.message } : {}),
+      },
+      body: {
+        storage: {
+          value: params.nextBodyStorageValue,
+          representation: "storage",
+        },
+      },
+      ...(current.spaceKey ? { space: { key: current.spaceKey } } : {}),
+    };
+
+    const res = await this.request(
+      `${this.apiBaseUrl}/content/${encodeURIComponent(current.id)}`,
+      "PUT",
+      JSON.stringify(body),
+    );
+    const json = (await res.json()) as ContentApiResult;
+    return this.toPageRecord(json);
   }
 
   private async findAttachmentByFileName(
