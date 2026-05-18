@@ -18,6 +18,13 @@
 - `confluence_add_anchor_block_to_section`: 给一个标题 section 自动加上起止 Anchor，便于后续稳定更新
 - `confluence_preview_page_anchor_block_update`: 预览按 Anchor 范围更新的命中块，返回旧内容和确认 hash
 - `confluence_update_page_anchor_block_confirmed`: 带 hash 确认提交 Anchor 范围更新
+- `confluence_stage_page_update`: 暂存整页改动到 MCP 服务端内存，不提交到 Confluence
+- `confluence_stage_page_section_update`: 暂存标题 section 改动到 MCP 服务端内存，不提交到 Confluence
+- `confluence_stage_page_anchor_block_update`: 暂存 Anchor 块改动到 MCP 服务端内存，不提交到 Confluence
+- `confluence_list_pending_page_updates`: 列出当前 MCP 进程里的未提交 wiki 改动
+- `confluence_get_pending_page_update`: 查看某个未提交改动的 old/new/diff 内容
+- `confluence_commit_pending_page_update`: 校验 hash 后把某个未提交改动真正提交到 Confluence
+- `confluence_discard_pending_page_update`: 丢弃某个未提交改动
 - `confluence_upload_attachment`: 上传页面附件（支持本地文件路径或 base64，同名附件默认更新为新版本）
 - `confluence_get_current_user`: 获取当前认证用户（whoami）
 
@@ -95,6 +102,7 @@ npm start
 - 上传图片后，`confluence_upload_attachment` 会返回 `storageImageMarkup`，可把它拼到 `confluence_update_page` 的 `bodyStorageValue` 中展示图片。
 - Confluence 原生更新仍是整页版本化 `PUT`；`confluence_update_page_section` 只是把“整页读取 + 局部替换 + 整页提交”放在 MCP 服务端完成，从而显著减少模型侧 tokens。
 - 两阶段更新不会减少 Confluence 侧请求次数，但会显著降低误改风险：preview 返回旧内容和 `expectedCurrentHash`，confirmed update 会重新拉取页面并校验 hash 一致后才提交。
+- 暂存更新工具会把改动保存在当前 MCP 服务端进程内存中，不会调用 Confluence `PUT`；重启 MCP 服务后这些未提交草稿会丢失。
 - Anchor 模式使用 Confluence Anchor 宏作为隐形边界，适合长期自动维护固定区域；普通阅读模式下通常不会显示这些锚点。
 
 ## 低 Token 推荐流程
@@ -112,6 +120,19 @@ npm start
 2. 检查返回的 `oldStorageValue` 和 `newStorageValue` 是否符合预期。
 3. 把返回的 `expectedCurrentHash` 原样传给 `confluence_update_page_section_confirmed`。
 4. 服务端会重新拉取页面并校验 hash，一致才真正提交更新。
+
+
+## 未提交改动流程
+
+如果希望 AI 先改 wiki、你检查后再决定是否真正保存，可以使用暂存工具：
+
+1. 用 `confluence_stage_page_section_update`、`confluence_stage_page_anchor_block_update` 或 `confluence_stage_page_update` 创建未提交草稿。
+2. 检查返回的 `oldStorageValue`、`newStorageValue`、`diffStorageValue` 和 `draftId`。
+3. 需要稍后查看时，用 `confluence_list_pending_page_updates` 或 `confluence_get_pending_page_update`。
+4. 确认保存时，用 `confluence_commit_pending_page_update` 提交；服务端会重新拉取页面并校验 `expectedCurrentHash`，一致才写入 Confluence。
+5. 不想保存时，用 `confluence_discard_pending_page_update` 丢弃。
+
+这些草稿只存在于当前 MCP 服务端内存，不会出现在 Confluence 页面历史里，也不会跨服务重启持久化。
 
 ## 更稳定的 Anchor 更新
 

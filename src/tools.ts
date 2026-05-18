@@ -442,6 +442,197 @@ export function registerTools(server: McpServer, client: ConfluenceClient): void
   );
 
   server.tool(
+    "confluence_stage_page_update",
+    "Stage a full-page update in MCP server memory without writing to Confluence. Use list/get to review, commit to save, or discard to drop it.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      bodyStorageValue: z
+        .string()
+        .describe("Proposed new page body in Confluence storage format (XHTML)"),
+      title: z
+        .string()
+        .optional()
+        .describe("Proposed new page title (keeps current title if omitted)"),
+    },
+    async ({ pageId, bodyStorageValue, title }) => {
+      try {
+        const draft = await client.stagePageUpdate({
+          pageId,
+          bodyStorageValue,
+          title,
+        });
+        return jsonContent(draft);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_stage_page_section_update",
+    "Stage a heading-based section update in MCP server memory without writing to Confluence. Returns a draftId plus old/new/diff content for review.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      heading: z.string().describe("Heading text used to locate the target section"),
+      sectionStorageValue: z
+        .string()
+        .describe("Proposed replacement storage XHTML for the target section"),
+      occurrence: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("When the same heading appears multiple times, choose which occurrence (default 1)"),
+      includeHeading: z
+        .boolean()
+        .optional()
+        .describe("When true replace from the heading tag itself; when false only replace the body below it (default true)"),
+      matchMode: z
+        .enum(["exact", "contains"])
+        .optional()
+        .describe("Heading match mode: exact or contains (default exact)"),
+      title: z
+        .string()
+        .optional()
+        .describe("Proposed new page title (keeps current title if omitted)"),
+    },
+    async ({
+      pageId,
+      heading,
+      sectionStorageValue,
+      occurrence,
+      includeHeading,
+      matchMode,
+      title,
+    }) => {
+      try {
+        const draft = await client.stagePageSectionUpdate({
+          pageId,
+          heading,
+          sectionStorageValue,
+          occurrence,
+          includeHeading,
+          matchMode,
+          title,
+        });
+        return jsonContent(draft);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_stage_page_anchor_block_update",
+    "Stage an anchor-based block update in MCP server memory without writing to Confluence. Returns a draftId plus old/new/diff content for review.",
+    {
+      pageId: z.string().describe("Confluence page ID"),
+      startAnchor: z.string().describe("Start anchor name"),
+      endAnchor: z.string().describe("End anchor name"),
+      blockStorageValue: z
+        .string()
+        .describe("Proposed replacement storage XHTML between the two anchors"),
+      title: z
+        .string()
+        .optional()
+        .describe("Proposed new page title (keeps current title if omitted)"),
+    },
+    async ({ pageId, startAnchor, endAnchor, blockStorageValue, title }) => {
+      try {
+        const draft = await client.stagePageAnchorBlockUpdate({
+          pageId,
+          startAnchor,
+          endAnchor,
+          blockStorageValue,
+          title,
+        });
+        return jsonContent(draft);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_list_pending_page_updates",
+    "List staged page updates kept in MCP server memory. These drafts have not been written to Confluence.",
+    {
+      pageId: z
+        .string()
+        .optional()
+        .describe("Only list pending updates for this Confluence page ID"),
+    },
+    async ({ pageId }) => {
+      try {
+        const drafts = client.listPendingPageUpdates(pageId);
+        return jsonContent(drafts);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_get_pending_page_update",
+    "Get one staged page update by draftId. The draft has not been written to Confluence.",
+    {
+      draftId: z.string().describe("Draft ID returned by a stage tool"),
+    },
+    async ({ draftId }) => {
+      try {
+        const draft = client.getPendingPageUpdate(draftId);
+        return jsonContent(draft);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_discard_pending_page_update",
+    "Discard one staged page update by draftId without writing it to Confluence.",
+    {
+      draftId: z.string().describe("Draft ID returned by a stage tool"),
+    },
+    async ({ draftId }) => {
+      try {
+        const draft = client.discardPendingPageUpdate(draftId);
+        return jsonContent(draft);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
+    "confluence_commit_pending_page_update",
+    "Commit one staged page update to Confluence by draftId after re-reading and hash-checking the current content.",
+    {
+      draftId: z.string().describe("Draft ID returned by a stage tool"),
+      minorEdit: z
+        .boolean()
+        .optional()
+        .describe("Whether this is a minor edit (default true)"),
+      message: z
+        .string()
+        .optional()
+        .describe("Version update message / change comment"),
+    },
+    async ({ draftId, minorEdit, message }) => {
+      try {
+        const page = await client.commitPendingPageUpdate({
+          draftId,
+          minorEdit,
+          message,
+        });
+        return jsonContent(page);
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.tool(
     "confluence_add_anchor_block_to_section",
     "Insert invisible start/end anchor macros around a heading-based section so later updates can target a stable block instead of relying on heading matching.",
     {

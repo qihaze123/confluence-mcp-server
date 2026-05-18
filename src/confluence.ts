@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 // ---- Config types -----------------------------------------------------------
 
@@ -64,6 +64,20 @@ export interface PageSectionUpdatePreview extends ConfluencePage {
   oldStorageValue: string;
   newStorageValue: string;
   expectedCurrentHash: string;
+}
+
+export interface PendingPageUpdate extends ConfluencePage {
+  draftId: string;
+  targetType: "page" | "heading" | "anchor";
+  targetLabel: string;
+  includeHeading?: boolean;
+  expectedCurrentHash: string;
+  oldStorageValue: string;
+  newStorageValue: string;
+  diffStorageValue: string;
+  hasChanges: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ConfluenceAttachment {
@@ -314,8 +328,72 @@ interface AnchorBlockMatch {
   contentEnd: number;
 }
 
+interface PendingPageUpdateRecord extends PendingPageUpdate {
+  heading?: string;
+  occurrence?: number;
+  matchMode?: HeadingMatchMode;
+  startAnchor?: string;
+  endAnchor?: string;
+  nextTitle?: string;
+}
+
 function buildContentHash(input: string): string {
   return createHash("sha256").update(input).digest("hex");
+}
+
+function buildStorageDiff(oldStorageValue: string, newStorageValue: string): string {
+  if (oldStorageValue === newStorageValue) {
+    return "";
+  }
+
+  const oldLines = oldStorageValue.split(/\r?\n/);
+  const newLines = newStorageValue.split(/\r?\n/);
+  let prefixLength = 0;
+
+  while (
+    prefixLength < oldLines.length &&
+    prefixLength < newLines.length &&
+    oldLines[prefixLength] === newLines[prefixLength]
+  ) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength + prefixLength < oldLines.length &&
+    suffixLength + prefixLength < newLines.length &&
+    oldLines[oldLines.length - 1 - suffixLength] ===
+      newLines[newLines.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  const contextSize = 3;
+  const contextStart = Math.max(0, prefixLength - contextSize);
+  const oldChangedEnd = oldLines.length - suffixLength;
+  const newChangedEnd = newLines.length - suffixLength;
+  const contextOldEnd = Math.min(oldLines.length, oldChangedEnd + contextSize);
+  const contextNewEnd = Math.min(newLines.length, newChangedEnd + contextSize);
+  const oldStartLine = contextStart + 1;
+  const newStartLine = contextStart + 1;
+  const oldLineCount = contextOldEnd - contextStart;
+  const newLineCount = contextNewEnd - contextStart;
+  const diffLines = [`@@ -${oldStartLine},${oldLineCount} +${newStartLine},${newLineCount} @@`];
+
+  for (const line of oldLines.slice(contextStart, prefixLength)) {
+    diffLines.push(` ${line}`);
+  }
+  for (const line of oldLines.slice(prefixLength, oldChangedEnd)) {
+    diffLines.push(`-${line}`);
+  }
+  for (const line of newLines.slice(prefixLength, newChangedEnd)) {
+    diffLines.push(`+${line}`);
+  }
+  for (const line of newLines.slice(newChangedEnd, contextNewEnd)) {
+    diffLines.push(` ${line}`);
+  }
+
+  return diffLines.join("\n");
 }
 
 function extractHeadingMatches(bodyStorageValue: string): HeadingMatch[] {
@@ -487,6 +565,7 @@ export class ConfluenceClient {
   private readonly baseHeaders: Record<string, string>;
   private readonly jsonHeaders: Record<string, string>;
   private readonly defaultSpace?: string;
+  private readonly pendingPageUpdates = new Map<string, PendingPageUpdateRecord>();
 
   constructor(config: ConfluenceConfig) {
     this.mode = config.mode;
@@ -699,6 +778,153 @@ export class ConfluenceClient {
       newStorageValue: params.sectionStorageValue.trim(),
       expectedCurrentHash: buildContentHash(oldStorageValue),
     };
+  }
+
+  async stagePageUpdate(params: {
+    pageId: string;
+    bodyStorageValue: string;
+    title?: string;
+  }): Promise<PendingPageUpdate> {
+    const current = await this.getPage(params.pageId, "body.storage,version,space");
+    const oldStorageValue = current.bodyStorageValue.trim();
+    return this.storePendingPageUpdate({
+      ...this.buildPendingBase(current, {
+        targetType: "page",
+        targetLabel: current.title,
+        oldStorageValue,
+        newStorageValue: params.bodyStorageValue.trim(),
+      }),
+      nextTitle: params.title,
+    });
+  }
+
+  async stagePageSectionUpdate(params: {
+    pageId: string;
+    heading: string;
+    sectionStorageValue: string;
+    occurrence?: number;
+    includeHeading?: boolean;
+    matchMode?: HeadingMatchMode;
+    title?: string;
+  }): Promise<PendingPageUpdate> {
+    const page = await this.getPage(params.pageId, "body.storage,version,space");
+    const section = findSectionMatch({
+      bodyStorageValue: page.bodyStorageValue,
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+    });
+    const includeHeading = params.includeHeading !== false;
+    const start = includeHeading ? section.start : section.contentStart;
+    const end = section.contentEnd;
+    const oldStorageValue = page.bodyStorageValue.slice(start, end).trim();
+
+    return this.storePendingPageUpdate({
+      ...this.buildPendingBase(page, {
+        targetType: "heading",
+        targetLabel: `${section.text}#${section.occurrence}`,
+        includeHeading,
+        oldStorageValue,
+        newStorageValue: params.sectionStorageValue.trim(),
+      }),
+      heading: params.heading,
+      occurrence: params.occurrence,
+      matchMode: params.matchMode,
+      nextTitle: params.title,
+    });
+  }
+
+  async stagePageAnchorBlockUpdate(params: {
+    pageId: string;
+    startAnchor: string;
+    endAnchor: string;
+    blockStorageValue: string;
+    title?: string;
+  }): Promise<PendingPageUpdate> {
+    const page = await this.getPage(params.pageId, "body.storage,version,space");
+    const block = findAnchorBlockMatch({
+      bodyStorageValue: page.bodyStorageValue,
+      startAnchor: params.startAnchor,
+      endAnchor: params.endAnchor,
+    });
+    const oldStorageValue = page.bodyStorageValue
+      .slice(block.contentStart, block.contentEnd)
+      .trim();
+
+    return this.storePendingPageUpdate({
+      ...this.buildPendingBase(page, {
+        targetType: "anchor",
+        targetLabel: `${block.startAnchor.name} -> ${block.endAnchor.name}`,
+        oldStorageValue,
+        newStorageValue: params.blockStorageValue.trim(),
+      }),
+      startAnchor: params.startAnchor,
+      endAnchor: params.endAnchor,
+      nextTitle: params.title,
+    });
+  }
+
+  listPendingPageUpdates(pageId?: string): PendingPageUpdate[] {
+    return Array.from(this.pendingPageUpdates.values())
+      .filter((draft) => !pageId || draft.id === pageId)
+      .map((draft) => this.toPendingPageUpdate(draft));
+  }
+
+  getPendingPageUpdate(draftId: string): PendingPageUpdate {
+    return this.toPendingPageUpdate(this.requirePendingPageUpdate(draftId));
+  }
+
+  discardPendingPageUpdate(draftId: string): PendingPageUpdate {
+    const draft = this.requirePendingPageUpdate(draftId);
+    this.pendingPageUpdates.delete(draftId);
+    return this.toPendingPageUpdate(draft);
+  }
+
+  async commitPendingPageUpdate(params: {
+    draftId: string;
+    minorEdit?: boolean;
+    message?: string;
+  }): Promise<ConfluencePage | PageSection | PageAnchorBlock> {
+    const draft = this.requirePendingPageUpdate(params.draftId);
+    let committed: ConfluencePage | PageSection | PageAnchorBlock;
+
+    if (draft.targetType === "page") {
+      committed = await this.confirmFullPageUpdate({
+        pageId: draft.id,
+        bodyStorageValue: draft.newStorageValue,
+        expectedCurrentHash: draft.expectedCurrentHash,
+        title: draft.nextTitle,
+        minorEdit: params.minorEdit,
+        message: params.message,
+      });
+    } else if (draft.targetType === "heading") {
+      committed = await this.confirmPageSectionUpdate({
+        pageId: draft.id,
+        heading: draft.heading ?? draft.targetLabel,
+        sectionStorageValue: draft.newStorageValue,
+        expectedCurrentHash: draft.expectedCurrentHash,
+        occurrence: draft.occurrence,
+        includeHeading: draft.includeHeading,
+        matchMode: draft.matchMode,
+        title: draft.nextTitle,
+        minorEdit: params.minorEdit,
+        message: params.message,
+      });
+    } else {
+      committed = await this.confirmPageAnchorBlockUpdate({
+        pageId: draft.id,
+        startAnchor: draft.startAnchor ?? "",
+        endAnchor: draft.endAnchor ?? "",
+        blockStorageValue: draft.newStorageValue,
+        expectedCurrentHash: draft.expectedCurrentHash,
+        title: draft.nextTitle,
+        minorEdit: params.minorEdit,
+        message: params.message,
+      });
+    }
+
+    this.pendingPageUpdates.delete(params.draftId);
+    return committed;
   }
 
   async confirmPageSectionUpdate(params: {
@@ -937,6 +1163,31 @@ export class ConfluenceClient {
     });
   }
 
+  async confirmFullPageUpdate(params: {
+    pageId: string;
+    bodyStorageValue: string;
+    expectedCurrentHash: string;
+    title?: string;
+    minorEdit?: boolean;
+    message?: string;
+  }): Promise<ConfluencePage> {
+    const current = await this.getPage(params.pageId, "body.storage,version,space");
+    const currentStorageValue = current.bodyStorageValue.trim();
+
+    if (buildContentHash(currentStorageValue) !== params.expectedCurrentHash) {
+      throw new Error(
+        "Preview hash mismatch. The page changed after staging; stage the update again before committing.",
+      );
+    }
+
+    return this.updatePageBody(current, {
+      nextBodyStorageValue: params.bodyStorageValue,
+      title: params.title,
+      minorEdit: params.minorEdit,
+      message: params.message,
+    });
+  }
+
   async updatePageSection(params: {
     pageId: string;
     heading: string;
@@ -1015,6 +1266,88 @@ export class ConfluenceClient {
       throw new Error("Confluence did not return an uploaded attachment record.");
     }
     return this.toAttachmentRecord(attachment, file.fileName);
+  }
+
+  private buildPendingBase(
+    page: PageDetail,
+    params: {
+      targetType: PendingPageUpdate["targetType"];
+      targetLabel: string;
+      includeHeading?: boolean;
+      oldStorageValue: string;
+      newStorageValue: string;
+    },
+  ): PendingPageUpdateRecord {
+    const now = new Date().toISOString();
+    const draft: PendingPageUpdateRecord = {
+      id: page.id,
+      type: page.type,
+      title: page.title,
+      spaceKey: page.spaceKey,
+      url: page.url,
+      draftId: randomUUID(),
+      targetType: params.targetType,
+      targetLabel: params.targetLabel,
+      oldStorageValue: params.oldStorageValue,
+      newStorageValue: params.newStorageValue,
+      expectedCurrentHash: buildContentHash(params.oldStorageValue),
+      diffStorageValue: buildStorageDiff(
+        params.oldStorageValue,
+        params.newStorageValue,
+      ),
+      hasChanges: params.oldStorageValue !== params.newStorageValue,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (typeof page.version === "number") {
+      draft.version = page.version;
+    }
+    if (typeof params.includeHeading === "boolean") {
+      draft.includeHeading = params.includeHeading;
+    }
+    return draft;
+  }
+
+  private storePendingPageUpdate(draft: PendingPageUpdateRecord): PendingPageUpdate {
+    this.pendingPageUpdates.set(draft.draftId, draft);
+    return this.toPendingPageUpdate(draft);
+  }
+
+  private requirePendingPageUpdate(draftId: string): PendingPageUpdateRecord {
+    const draft = this.pendingPageUpdates.get(draftId);
+    if (!draft) {
+      throw new Error(`Pending page update not found: ${draftId}.`);
+    }
+    return draft;
+  }
+
+  private toPendingPageUpdate(draft: PendingPageUpdateRecord): PendingPageUpdate {
+    const result: PendingPageUpdate = {
+      id: draft.id,
+      type: draft.type,
+      title: draft.title,
+      spaceKey: draft.spaceKey,
+      url: draft.url,
+      draftId: draft.draftId,
+      targetType: draft.targetType,
+      targetLabel: draft.targetLabel,
+      expectedCurrentHash: draft.expectedCurrentHash,
+      oldStorageValue: draft.oldStorageValue,
+      newStorageValue: draft.newStorageValue,
+      diffStorageValue: draft.diffStorageValue,
+      hasChanges: draft.hasChanges,
+      createdAt: draft.createdAt,
+      updatedAt: draft.updatedAt,
+    };
+
+    if (typeof draft.version === "number") {
+      result.version = draft.version;
+    }
+    if (typeof draft.includeHeading === "boolean") {
+      result.includeHeading = draft.includeHeading;
+    }
+    return result;
   }
 
   private async updatePageBody(
