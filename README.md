@@ -91,6 +91,16 @@ npm start
 
 该配置只保存在当前 MCP 服务进程内存中，重启后会丢失。长期使用仍建议放在 MCP 客户端的环境变量配置里，避免在对话上下文中暴露密钥。
 
+如果当前进程已经有连接（例如通过环境变量连到了旧地址），也可以只切换部分字段。比如只把地址从一台 Confluence 切到另一台、账号密码不变：
+
+```json
+{
+  "baseUrl": "http://192.168.40.82:8090"
+}
+```
+
+未传的 `mode`、认证信息和 `defaultSpace` 会继承当前连接；如果显式传入 `token` / `password` / `username` / `authMode`，则会重新计算认证。
+
 ## 环境变量
 
 - `CONF_BASE_URL`: Confluence 基础地址，例如 `https://confluence.example.com`

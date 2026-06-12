@@ -47,6 +47,10 @@ class RuntimeConfluenceConnection {
     return this.client;
   }
 
+  getConfig(): ConfluenceConfig | undefined {
+    return this.config;
+  }
+
   getStatus() {
     if (!this.config) {
       return {
@@ -138,7 +142,8 @@ function registerConnectionTools(
       baseUrl: z
         .string()
         .min(1)
-        .describe("Confluence base URL, for example https://confluence.example.com"),
+        .optional()
+        .describe("Confluence base URL, for example https://confluence.example.com. Required for first configuration; omitted values inherit the current connection."),
       mode: z
         .enum(["cloud", "server", "dc", "datacenter", "data-center"])
         .optional()
@@ -170,7 +175,10 @@ function registerConnectionTools(
     },
     async ({ verify, ...input }) => {
       try {
-        const config = buildConfigFromInput(input as ConfluenceConfigInput);
+        const config = buildConfigFromInput(
+          input as ConfluenceConfigInput,
+          runtime.getConfig(),
+        );
         const candidateClient = new ConfluenceClient(config);
 
         const currentUser = verify === false

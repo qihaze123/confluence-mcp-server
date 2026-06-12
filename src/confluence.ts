@@ -1628,23 +1628,38 @@ export function tryBuildConfigFromEnv(): ConfluenceConfig | undefined {
   return buildConfigFromInput(input);
 }
 
-export function buildConfigFromInput(input: ConfluenceConfigInput): ConfluenceConfig {
+export function buildConfigFromInput(
+  input: ConfluenceConfigInput,
+  fallback?: ConfluenceConfig,
+): ConfluenceConfig {
   const baseUrl = requireConfigValue(
-    optionalInput(input.baseUrl),
+    optionalInput(input.baseUrl) ?? fallback?.baseUrl,
     "baseUrl is required (or set CONF_BASE_URL).",
   );
-  const mode = parseMode(optionalInput(input.mode) ?? "server");
-  const authMode = parseAuthMode(optionalInput(input.authMode) ?? "auto");
+  const mode = parseMode(optionalInput(input.mode) ?? fallback?.mode ?? "server");
 
   const username = optionalInput(input.username);
   const token = optionalInput(input.token, false);
   const password = optionalInput(input.password, false);
-  const defaultSpace = optionalInput(input.defaultSpace);
+  const defaultSpace = optionalInput(input.defaultSpace) ?? fallback?.defaultSpace;
+
+  if (!hasAuthInput(input) && fallback) {
+    return {
+      baseUrl,
+      mode,
+      username: fallback.username,
+      authHeader: fallback.authHeader,
+      resolvedAuthMode: fallback.resolvedAuthMode,
+      defaultSpace,
+    };
+  }
+
+  const authMode = parseAuthMode(optionalInput(input.authMode) ?? "auto");
 
   const auth = resolveAuthHeader({
     mode,
     authMode,
-    username,
+    username: username ?? fallback?.username,
     token,
     password,
   });
@@ -1673,6 +1688,15 @@ function readEnvConfigInput(): ConfluenceConfigInput {
 
 function hasConfigInput(input: ConfluenceConfigInput): boolean {
   return Object.values(input).some((value) => value !== undefined);
+}
+
+function hasAuthInput(input: ConfluenceConfigInput): boolean {
+  return (
+    optionalInput(input.authMode) !== undefined ||
+    optionalInput(input.username) !== undefined ||
+    optionalInput(input.token, false) !== undefined ||
+    optionalInput(input.password, false) !== undefined
+  );
 }
 
 function parseMode(value: string): ConfluenceMode {
