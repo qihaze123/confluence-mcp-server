@@ -63,6 +63,34 @@ npm start
 }
 ```
 
+也可以不在客户端配置里写连接信息，先只启动 MCP 服务：
+
+```json
+{
+  "mcpServers": {
+    "confluence": {
+      "command": "npx",
+      "args": ["-y", "confluence-mcp-server"]
+    }
+  }
+}
+```
+
+然后在对话里提供连接参数，让模型先调用 `confluence_configure_connection`：
+
+```json
+{
+  "baseUrl": "https://confluence.example.com",
+  "mode": "server",
+  "authMode": "auto",
+  "username": "your-username",
+  "token": "your-token",
+  "defaultSpace": "DOC"
+}
+```
+
+该配置只保存在当前 MCP 服务进程内存中，重启后会丢失。长期使用仍建议放在 MCP 客户端的环境变量配置里，避免在对话上下文中暴露密钥。
+
 ## 环境变量
 
 - `CONF_BASE_URL`: Confluence 基础地址，例如 `https://confluence.example.com`
@@ -72,6 +100,8 @@ npm start
 - `CONF_PASSWORD`: 用户密码（与 `CONF_TOKEN` 组合按模式使用）
 - `CONF_TOKEN`: 访问令牌（Cloud 下作为 API Token；Server 下默认走 Bearer）
 - `CONF_DEFAULT_SPACE`: 默认空间 Key（可选）
+
+如果未设置这些环境变量，服务会以“未配置连接”的状态启动；此时先调用 `confluence_configure_connection` 即可。可用 `confluence_get_connection_status` 查看当前连接状态，该工具不会返回 token/password。
 
 ## MCP 客户端配置示例
 

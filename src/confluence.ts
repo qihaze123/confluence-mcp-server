@@ -18,6 +18,23 @@ export interface ConfluenceConfig {
   defaultSpace?: string;
 }
 
+export interface ConfluenceConfigInput {
+  baseUrl?: string;
+  mode?: string;
+  authMode?: string;
+  username?: string;
+  password?: string;
+  token?: string;
+  defaultSpace?: string;
+}
+
+export class ConfluenceConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfluenceConfigError";
+  }
+}
+
 // ---- Unified model types ----------------------------------------------------
 
 export interface ConfluencePage {
@@ -1591,16 +1608,38 @@ export class ConfluenceClient {
 // ---- Config builder ---------------------------------------------------------
 
 export function buildConfig(): ConfluenceConfig {
-  const baseUrl = requireEnv("CONF_BASE_URL");
-  const mode = parseMode(
-    optionalEnv("CONF_MODE") ?? optionalEnv("CONF_DEPLOYMENT_MODE") ?? "server",
-  );
-  const authMode = parseAuthMode(optionalEnv("CONF_AUTH_MODE") ?? "auto");
+  try {
+    return buildConfigFromEnv();
+  } catch (error) {
+    if (error instanceof ConfluenceConfigError) {
+      return fatalConfig(error.message);
+    }
+    throw error;
+  }
+}
 
-  const username = optionalEnv("CONF_USERNAME");
-  const token = optionalEnv("CONF_TOKEN", false);
-  const password = optionalEnv("CONF_PASSWORD", false);
-  const defaultSpace = optionalEnv("CONF_DEFAULT_SPACE");
+export function buildConfigFromEnv(): ConfluenceConfig {
+  return buildConfigFromInput(readEnvConfigInput());
+}
+
+export function tryBuildConfigFromEnv(): ConfluenceConfig | undefined {
+  const input = readEnvConfigInput();
+  if (!hasConfigInput(input)) return undefined;
+  return buildConfigFromInput(input);
+}
+
+export function buildConfigFromInput(input: ConfluenceConfigInput): ConfluenceConfig {
+  const baseUrl = requireConfigValue(
+    optionalInput(input.baseUrl),
+    "baseUrl is required (or set CONF_BASE_URL).",
+  );
+  const mode = parseMode(optionalInput(input.mode) ?? "server");
+  const authMode = parseAuthMode(optionalInput(input.authMode) ?? "auto");
+
+  const username = optionalInput(input.username);
+  const token = optionalInput(input.token, false);
+  const password = optionalInput(input.password, false);
+  const defaultSpace = optionalInput(input.defaultSpace);
 
   const auth = resolveAuthHeader({
     mode,
@@ -1620,8 +1659,24 @@ export function buildConfig(): ConfluenceConfig {
   };
 }
 
+function readEnvConfigInput(): ConfluenceConfigInput {
+  return {
+    baseUrl: optionalEnv("CONF_BASE_URL"),
+    mode: optionalEnv("CONF_MODE") ?? optionalEnv("CONF_DEPLOYMENT_MODE"),
+    authMode: optionalEnv("CONF_AUTH_MODE"),
+    username: optionalEnv("CONF_USERNAME"),
+    token: optionalEnv("CONF_TOKEN", false),
+    password: optionalEnv("CONF_PASSWORD", false),
+    defaultSpace: optionalEnv("CONF_DEFAULT_SPACE"),
+  };
+}
+
+function hasConfigInput(input: ConfluenceConfigInput): boolean {
+  return Object.values(input).some((value) => value !== undefined);
+}
+
 function parseMode(value: string): ConfluenceMode {
-  const normalized = value.toLowerCase();
+  const normalized = value.trim().toLowerCase();
   if (normalized === "cloud") return "cloud";
   if (
     normalized === "server" ||
@@ -1631,17 +1686,17 @@ function parseMode(value: string): ConfluenceMode {
   ) {
     return "server";
   }
-  return fatalConfig(
-    "CONF_MODE must be one of: cloud, server (or CONF_DEPLOYMENT_MODE).",
+  return configError(
+    "mode must be one of: cloud, server, dc, datacenter, data-center.",
   );
 }
 
 function parseAuthMode(value: string): ConfluenceAuthMode {
-  const normalized = value.toLowerCase();
+  const normalized = value.trim().toLowerCase();
   if (normalized === "auto" || normalized === "basic" || normalized === "bearer") {
     return normalized;
   }
-  return fatalConfig("CONF_AUTH_MODE must be one of: auto, basic, bearer.");
+  return configError("authMode must be one of: auto, basic, bearer.");
 }
 
 function resolveAuthHeader(input: {
@@ -1652,14 +1707,14 @@ function resolveAuthHeader(input: {
   password?: string;
 }): { username?: string; authHeader: string; resolvedAuthMode: ResolvedAuthMode } {
   if (input.mode === "cloud") {
-    const user = requireValue(
+    const user = requireConfigValue(
       input.username,
-      "CONF_USERNAME is required in cloud mode.",
+      "username is required in cloud mode (or set CONF_USERNAME).",
     );
     const secret = input.token ?? input.password;
-    const credential = requireValue(
+    const credential = requireConfigValue(
       secret,
-      "Cloud mode requires CONF_TOKEN (preferred) or CONF_PASSWORD.",
+      "Cloud mode requires token (preferred) or password.",
     );
     return {
       username: user,
@@ -1669,9 +1724,9 @@ function resolveAuthHeader(input: {
   }
 
   if (input.authMode === "bearer") {
-    const token = requireValue(
+    const token = requireConfigValue(
       input.token,
-      "CONF_AUTH_MODE=bearer requires CONF_TOKEN.",
+      "authMode=bearer requires token.",
     );
     return {
       username: input.username,
@@ -1681,14 +1736,14 @@ function resolveAuthHeader(input: {
   }
 
   if (input.authMode === "basic") {
-    const user = requireValue(
+    const user = requireConfigValue(
       input.username,
-      "CONF_AUTH_MODE=basic requires CONF_USERNAME.",
+      "authMode=basic requires username.",
     );
     const secret = input.password ?? input.token;
-    const credential = requireValue(
+    const credential = requireConfigValue(
       secret,
-      "CONF_AUTH_MODE=basic requires CONF_PASSWORD (or CONF_TOKEN as password).",
+      "authMode=basic requires password (or token as password).",
     );
     return {
       username: user,
@@ -1707,9 +1762,9 @@ function resolveAuthHeader(input: {
   }
 
   if (input.password) {
-    const user = requireValue(
+    const user = requireConfigValue(
       input.username,
-      "Server auto mode with CONF_PASSWORD requires CONF_USERNAME.",
+      "Server auto mode with password requires username.",
     );
     return {
       username: user,
@@ -1718,29 +1773,30 @@ function resolveAuthHeader(input: {
     };
   }
 
-  return fatalConfig(
-    "Server mode requires CONF_TOKEN (Bearer) or CONF_USERNAME + CONF_PASSWORD.",
+  return configError(
+    "Server mode requires token (Bearer) or username + password.",
   );
-}
-
-function requireEnv(name: string): string {
-  const val = optionalEnv(name);
-  if (!val) {
-    return fatalConfig(`Required environment variable ${name} is not set.`);
-  }
-  return val;
 }
 
 function optionalEnv(name: string, trim = true): string | undefined {
   const raw = process.env[name];
   if (raw === undefined) return undefined;
-  const normalized = trim ? raw.trim() : raw;
+  return optionalInput(raw, trim);
+}
+
+function optionalInput(value: string | undefined, trim = true): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = trim ? value.trim() : value;
   return normalized === "" ? undefined : normalized;
 }
 
-function requireValue(value: string | undefined, message: string): string {
-  if (!value) return fatalConfig(message);
+function requireConfigValue(value: string | undefined, message: string): string {
+  if (!value) return configError(message);
   return value;
+}
+
+function configError(message: string): never {
+  throw new ConfluenceConfigError(message);
 }
 
 function fatalConfig(message: string): never {
